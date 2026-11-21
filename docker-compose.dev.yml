@@ -1,0 +1,269 @@
+services:
+  # ─────────────────────────────────────────────────────────────
+  # CORE-API
+  # ─────────────────────────────────────────────────────────────
+  core-api:
+    image: dillybert/core-api:${CORE_API_VERSION:-latest}
+    env_file:
+      - ${CORE_API_ENV_FILE}
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+      - core-api-infrastructure
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+    security_opt:
+      - no-new-privileges:true
+
+  # ─────────────────────────────────────────────────────────────
+  # POSTGRES + POSTGIS
+  # ─────────────────────────────────────────────────────────────
+  db:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - core-api-infrastructure-postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    security_opt:
+      - no-new-privileges:true
+
+  # ─────────────────────────────────────────────────────────────
+  # MIGRATE (manual: docker compose --profile tools run --rm migrate up)
+  # ─────────────────────────────────────────────────────────────
+  migrate:
+    image: migrate/migrate:v4.18.3
+    profiles: ["tools"]
+    volumes:
+      - ${CORE_API_MIGRATIONS_DIR}:/migrations:ro
+    entrypoint:
+      - migrate
+      - -path
+      - /migrations
+      - -database
+      - postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: "no"
+    logging: *default-logging
+
+  # ─────────────────────────────────────────────────────────────
+  # MARTIN (публичный tile-сервер через cloudflared)
+  # ─────────────────────────────────────────────────────────────
+  martin:
+    image: ${MARTIN_IMAGE:-ghcr.io/maplibre/martin:1.16.1}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    command: [--config, /tiles/config.yaml]
+    networks:
+      - tiles-public
+    ports:
+      - "127.0.0.1:${MARTIN_PORT:-3000}:3000"
+    volumes:
+      - ${MAP_DIR}/tiles:/tiles:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────
+  # OSRM (только внутренний, через core-api)
+  # ─────────────────────────────────────────────────────────────
+  osrm:
+    image: ${OSRM_IMAGE:-ghcr.io/project-osrm/osrm-backend:v6.0.0}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    command: [osrm-routed, --algorithm, mld, /data/map.osrm]
+    networks:
+      - core-api-infrastructure
+    ports:
+      - "127.0.0.1:${OSRM_PORT:-5000}:5000"
+    volumes:
+      - type: bind
+        source: ${MAP_DIR:?Set MAP_DIR in .env}/osrm
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:5000/nearest/v1/driving/0,0' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────
+  # PHOTON (только внутренний, через core-api)
+  # ─────────────────────────────────────────────────────────────
+  photon:
+    image: ${PHOTON_IMAGE:-dillybert/photon-runtime:1.0.0}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    command:
+      - serve
+      - -listen-port
+      - "8080"
+      - -listen-ip
+      - 0.0.0.0
+      - -synonym-file
+      - /config/synonyms.json
+      - -data-dir
+      - /data
+    networks:
+      - core-api-infrastructure
+    ports:
+      - "127.0.0.1:${PHOTON_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${MAP_DIR:?Set MAP_DIR in .env}/photon
+        target: /data
+        bind:
+          create_host_path: false
+      - ${MAP_DIR}/photon/synonyms.json:/config/synonyms.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8080/status' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────
+  # CLOUDFLARED (публичный вход ТОЛЬКО для martin)
+  # ─────────────────────────────────────────────────────────────
+  cloudflared:
+    profiles: [public]
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.9.0}
+    command: [tunnel, --no-autoupdate, run]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    networks:
+      - tiles-public
+      - frontend
+    depends_on:
+      martin:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────
+  # NGINX (gateway: API + статика)
+  # ─────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27.3-alpine
+    environment:
+      WEB_HOST:   ${WEB_HOST:-carveo.kz}
+      TMA_HOST:   ${TMA_HOST:-tma.carveo.kz}
+      ADMIN_HOST: ${ADMIN_HOST:-admin.carveo.kz}
+      API_HOST:   ${API_HOST:-api.carveo.kz}
+      NGINX_ENVSUBST_FILTER: "WEB_HOST|TMA_HOST|ADMIN_HOST|API_HOST"
+    ports:
+      - "127.0.0.1:5533:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/default.dev.conf.template:/etc/nginx/templates/default.conf.template:ro
+    depends_on:
+      core-api:
+        condition: service_healthy
+    networks:
+      - frontend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging: *default-logging
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+      - /etc/nginx/conf.d
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+  core-api-infrastructure:
+    external: true
+  tiles-public:
+    driver: bridge
+
+volumes:
+  core-api-infrastructure-postgres-data:

@@ -1,0 +1,144 @@
+# ═══════════════════════════════════════════════════════════════
+#  1. DEFAULT — fallback для запросов, не совпавших по server_name
+# ═══════════════════════════════════════════════════════════════
+server {
+    listen 80 default_server;
+    server_name _;
+
+    # Docker healthcheck для nginx — стучится с 127.0.0.1
+    location = /healthz {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 404 "frontend not configured";
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  2. API_HOST — только API, без статики
+# ═══════════════════════════════════════════════════════════════
+server {
+    listen 80;
+    server_name ${API_HOST};
+
+    location / {
+        # set ДО rewrite — они в одной rewrite-фазе, break в rewrite
+        # останавливает все последующие директивы, включая set
+        set $upstream http://core-api:8080;
+        proxy_pass $upstream;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+
+        # раскомментируй, когда будешь готов к rate-limit
+        # limit_req  zone=api_rl burst=40 nodelay;
+        # limit_req_status 429;
+        # limit_conn api_conn 20;
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  3. WEB_HOST — статика web + API (/api/*)
+# ═══════════════════════════════════════════════════════════════
+server {
+    listen 80;
+    server_name ${WEB_HOST};
+    root /usr/share/nginx/html/web;
+    index index.html;
+
+    # API: strip /api и проксируем в core-api
+    location /api/ {
+        set $upstream http://core-api:8080;
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $upstream;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    # SPA: отдай файл, если есть; иначе index.html (клиентский роутинг)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  4. TMA_HOST — статика TMA + API
+# ═══════════════════════════════════════════════════════════════
+server {
+    listen 80;
+    server_name ${TMA_HOST};
+    root /usr/share/nginx/html/tma;
+    index index.html;
+
+    location /api/ {
+        set $upstream http://core-api:8080;
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $upstream;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  5. ADMIN_HOST — статика admin + API
+# ═══════════════════════════════════════════════════════════════
+server {
+    listen 80;
+    server_name ${ADMIN_HOST};
+    root /usr/share/nginx/html/admin;
+    index index.html;
+
+    location /api/ {
+        set $upstream http://core-api:8080;
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $upstream;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $forwarded_proto;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
